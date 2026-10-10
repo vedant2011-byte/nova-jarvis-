@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Test runtime artifacts (created by pytest runs)
+data-test/
+logs-test/
+
+# Data & logs (created at runtime)
+data/
+logs/
+*.log
+*.db
+*.db-wal
+*.db-shm
+
+# Node
+node_modules/
+frontend/dist/
+
+# Env & secrets
+.env
+
+# OS
+Thumbs.db
+.DS_Store

@@ -1,0 +1,62 @@
+:root {
+  --bg-0: #04070c;
+  --bg-1: #070d16;
+  --bg-2: #0a1220;
+  --panel: rgba(10, 22, 38, 0.55);
+  --panel-border: rgba(56, 189, 248, 0.18);
+  --cyan: #22d3ee;
+  --cyan-soft: rgba(34, 211, 238, 0.55);
+  --blue: #38bdf8;
+  --violet: #8b5cf6;
+  --text-hi: #e2f3ff;
+  --text-mid: #7da5c0;
+  --text-low: #3d5a73;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --err: #f87171;
+  --font-display: 'Rajdhani', system-ui, sans-serif;
+  --font-mono: 'Share Tech Mono', monospace;
+  --anim: 1;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg-0);
+  color: var(--text-hi);
+  font-family: var(--font-display);
+  overflow: hidden;
+}
+
+::selection { background: rgba(34, 211, 238, 0.3); }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(56, 189, 248, 0.2); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(56, 189, 248, 0.4); }
+
+button {
+  font-family: var(--font-display);
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: inherit;
+}
+
+button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible {
+  outline: 1px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+input, select {
+  font-family: var(--font-display);
+  background: rgba(8, 18, 32, 0.8);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  color: var(--text-hi);
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 14px;
+}
+input[type="checkbox"] { accent-color: var(--cyan); }
+input[type="range"] { accent-color: var(--cyan); }
