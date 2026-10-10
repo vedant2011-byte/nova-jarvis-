@@ -1,0 +1,22 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "hud": {
+      "root": "jarvis/frontend/"
+    },
+    "api": {
+      "root": "jarvis/",
+      "entrypoint": "vercel_entry:app",
+      "functions": {
+        "vercel_entry.py": {
+          "excludeFiles": "{frontend/**,data/**,data-test/**,logs/**,logs-test/**,tests/**,docs/**,scripts/**,.pytest_cache/**,**/__pycache__/**}"
+        }
+      }
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": { "service": "api" } },
+    { "source": "/ws", "destination": { "service": "api" } },
+    { "source": "/(.*)", "destination": { "service": "hud" } }
+  ]
+}

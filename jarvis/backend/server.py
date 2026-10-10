@@ -30,14 +30,24 @@ from pydantic import BaseModel
 # ---------------------------------------------------------------------------
 from jarvis.config.settings import LOG_FILE, LOG_DIR, PROJECT_ROOT, get_settings
 
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+# File logging only when the log dir is actually writable (it is not on
+# serverless platforms like Vercel, where only /tmp is writable — crashing
+# at import time there would break the whole deployment).
+try:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _probe = LOG_DIR / ".write_test"
+    _probe.write_bytes(b"")
+    _probe.unlink()
+    _log_handlers: list = [
+        logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=3, encoding="utf-8"),
+    ]
+except OSError:  # read-only FS or blocked mkdir (e.g. Vercel Functions)
+    _log_handlers = []
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
-    handlers=[
-        logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=3, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
+    handlers=[*_log_handlers, logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger("jarvis.server")
 
