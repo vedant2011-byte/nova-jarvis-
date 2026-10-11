@@ -7,9 +7,10 @@
     "api": {
       "root": "jarvis/",
       "entrypoint": "vercel_entry:app",
+      "installCommand": "pip install -r vercel-requirements.txt",
       "functions": {
         "vercel_entry.py": {
-          "excludeFiles": "{frontend/**,data/**,data-test/**,logs/**,logs-test/**,tests/**,docs/**,scripts/**,.pytest_cache/**,**/__pycache__/**}"
+          "excludeFiles": "{frontend/**,data/**,data-test/**,logs/**,logs-test/**,tests/**,docs/**,scripts/**,.pytest_cache/**,**/__pycache__/**,*.log,.venv/**}"
         }
       }
     }

@@ -1,0 +1,23 @@
+# Cloud-only dependencies for the Vercel `api` service.
+#
+# Installed by `installCommand` in the root vercel.json (the `api` service),
+# NOT by the default `pip install -r requirements.txt`. This keeps the
+# deployed function bundle tiny (~23 MB of wheels vs ~190 MB for the full
+# set) so it stays far below Vercel's 500 MB function-size limit.
+#
+# The local Windows app is unaffected: it keeps installing the full
+# jarvis/requirements.txt. Do NOT add desktop-only packages here
+# (faster-whisper/ctranslate2/onnxruntime/av, sounddevice, pyttsx3,
+# Pillow, playwright, pywin32...) — every one of those imports lazily
+# inside its tool/voice module and the backend reports them honestly
+# as unavailable when missing.
+#
+# numpy IS required in the cloud: jarvis/voice/audio.py imports it at
+# module level and server.py imports the voice listener at import time.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+websockets>=12.0
+pydantic>=2.5
+requests>=2.31
+psutil>=5.9
+numpy>=1.24

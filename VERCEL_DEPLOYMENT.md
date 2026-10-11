@@ -21,9 +21,10 @@ The repo contains two independently-built apps:
     "api": {
       "root": "jarvis/",
       "entrypoint": "vercel_entry:app",
+      "installCommand": "pip install -r vercel-requirements.txt",
       "functions": {
         "vercel_entry.py": {
-          "excludeFiles": "{frontend/**,data/**,data-test/**,logs/**,logs-test/**,tests/**,docs/**,scripts/**,.pytest_cache/**,**/__pycache__/**}"
+          "excludeFiles": "{frontend/**,data/**,data-test/**,logs/**,logs-test/**,tests/**,docs/**,scripts/**,.pytest_cache/**,**/__pycache__/**,*.log,.venv/**}"
         }
       }
     }
@@ -58,9 +59,21 @@ The repo contains two independently-built apps:
   entrypoint relative to the service root; from inside `jarvis/` the package
   `jarvis` itself is not importable without this shim. Application code was
   not modified by this — it only fixes import resolution.
-- `excludeFiles` keeps tests/data/logs/frontend-source out of the Python
+- `installCommand` points the `api` service at **`jarvis/vercel-requirements.txt`**,
+  a minimal cloud dependency set (fastapi, uvicorn[standard], websockets,
+  pydantic, requests, psutil, numpy). The default (`pip install -r
+  requirements.txt`) would install the FULL desktop set — measured on
+  Linux/Python 3.13 that is **~190 MB of wheels** dominated by playwright
+  (48 MB), ctranslate2 (40 MB), av/FFmpeg (35 MB), onnxruntime (24 MB),
+  numpy (17 MB) — and the first deployment failed with *"Total bundle size
+  (608.97 MB) exceeds the maximum function size (500 MB)"*. The minimal
+  set is **~23 MB of wheels**. The local Windows app is untouched: it still
+  installs the full `requirements.txt`.
+- `excludeFiles` keeps tests/data/logs/frontend-source (including
+  `frontend/node_modules`) and stray `*.log`/`.venv` out of the Python
   function bundle (the bundle limit is 500 MB uncompressed and every
-  reachable file is included by default).
+  reachable file is included by default). The bundled application source
+  itself measured **0.25 MB** after these exclusions.
 - Logging: the backend now only attaches its `RotatingFileHandler` when the
   log directory is **writable**; on Vercel (read-only FS) logging falls back
   to stdout-only. Local file logging on Windows is unchanged.
@@ -79,7 +92,7 @@ PC can only run on your PC. This is what a Vercel deployment means:
 | Mic / wake word / push-to-talk | ❌ | no audio hardware in a serverless function; backend reports it honestly |
 | TTS / voice output | ❌ (server-side) | no audio output; HUD will show TTS unavailable |
 | Open/close apps, terminal, files, screenshots on **your machine** | ❌ | the deployed backend is not your computer — it will answer honestly that the action can't be performed |
-| Playwright browser automation | ⚠️ | Playwright is installed but no browser binaries ship in the bundle; tool reports honestly if unavailable |
+| Playwright browser automation | ❌ | Not installed in the cloud bundle (deliberately — the Python package alone is 48 MB compressed); the tool reports honestly if unavailable |
 | WebSocket live events | ✅ works | Vercel Functions support WS (Beta, Fluid compute on by default); the HUD already reconnects automatically |
 
 The desktop app you run locally at `127.0.0.1:8765` keeps **every** feature —
@@ -129,8 +142,10 @@ Nothing sensitive is written into the repo or this config.
 2. Deploy (CLI `vercel` from the repo root, or connect the GitHub repo).
    The `hud` service runs `npm install && npm run build` in
    `jarvis/frontend/` automatically; the `api` service installs
-   `requirements.txt` automatically and runs on Python **3.13** (pinned
-   via `jarvis/.python-version`; Vercel supports 3.12/3.13/3.14).
+   **`vercel-requirements.txt`** (via `installCommand` in `vercel.json`) —
+   the minimal cloud-only dependency set, ~23 MB instead of ~190 MB — and
+   runs on Python **3.13** (pinned via `jarvis/.python-version`; Vercel
+   supports 3.12/3.13/3.14).
 3. Set the env vars from the table above on the `api` service, then
    redeploy so they are present at build/runtime.
 4. Do NOT point a real domain at this expecting full desktop control — see
@@ -145,14 +160,25 @@ Nothing sensitive is written into the repo or this config.
   instance. For genuinely durable server memory you'd need an external store
   (e.g. Vercel Marketplace Redis/Postgres) — deliberately NOT added here
   because it would change the product (and add credentials) without your OK.
-- **First deploy can be slow**: `verify asyncio` cycle of pip-install plus
-  bundle upload; later deploys reuse caches. If the function's Python
-  bundle ever exceeded 500 MB, the excluded dirs above would need pruning —
-  currently far below.
+- **Bundle size (the 500 MB limit)**: the failed first deploy reported
+  608.97 MB. Measured contributions on Linux/Python 3.13: full
+  `requirements.txt` ≈ **190 MB of wheels** (playwright 48, ctranslate2 40,
+  av 35, onnxruntime 24, numpy 17, pillow 7, plus faster-whisper's
+  huggingface/tokenizers/xet chain), application source ≈ 0.25 MB after
+  exclusions, and `frontend/node_modules` ≈ 66 MB (excluded by
+  `excludeFiles`). After switching the `api` service to
+  `vercel-requirements.txt`, the installed Python payload drops to
+  **~23 MB** — a >160 MB reduction with a large safety margin. The exact
+  bundle Vercel reports can only be confirmed by a real deployment; the
+  next deploy's build log is the authoritative measurement.
 - Deployment itself was **not** run (that requires your Vercel account and
   authorization); everything that could be verified locally was: `npm run
-  build` exit 0, entrypoint import exit 0 (verified TWICE — including with
+  build` exit 0, entrypoint import exit 0 (verified with
   sounddevice/pyttsx3/faster_whisper/PIL/playwright/piper imports
-  artificially blocked to simulate the bare Linux environment, proving the
-  app degrades gracefully instead of crashing at import), and 115/116
-  tests passing after every change.
+  artificially blocked to simulate the bare Linux cloud environment —
+  `GET /api/status` then answers 200 with STT/TTS/mic honestly reported
+  unavailable, proving the app degrades gracefully instead of crashing at
+  import), `vercel.json` validated against the official schema
+  (`https://openapi.vercel.sh/vercel.json`, zero violations), Linux wheel
+  sizes measured with `pip download --platform manylinux… --python-version
+  3.13`, and 115/116 tests passing after every change.
