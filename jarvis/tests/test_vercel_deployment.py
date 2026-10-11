@@ -88,6 +88,37 @@ def test_settings_survives_unwritable_data_dir(tmp_path) -> None:
     s.set("general.assistant_name", "JARVIS-TEST")
 
 
+def test_database_falls_back_to_memory_when_dir_unwritable(tmp_path) -> None:
+    """An uncreatable DB dir must degrade to in-memory, not 500.
+
+    Production observed: ``GET /api/history`` returned 500 because
+    ``sqlite3.connect`` on a read-only serverless filesystem raised.
+    """
+    blocker = tmp_path / "blocker"
+    blocker.write_bytes(b"")  # an existing FILE: mkdir under it must fail
+    from jarvis.memory.database import Database
+    from jarvis.memory.schemas import ConversationEntry
+
+    db = Database(db_path=blocker / "sub" / "jarvis.db")
+    assert db._persistent is False
+    cid = db.add_conversation(ConversationEntry(
+        role="user", content="hello in-memory", ts=1.0, source="text",
+    ))
+    assert cid >= 1
+    entries = db.get_conversations(limit=10)
+    assert any(e.content == "hello in-memory" for e in entries)
+    db.close()
+
+
+def test_database_still_persists_when_dir_writable(tmp_path) -> None:
+    """The in-memory fallback must not affect the normal writable case."""
+    from jarvis.memory.database import Database
+
+    db = Database(db_path=tmp_path / "jarvis.db")
+    assert db._persistent is True
+    db.close()
+
+
 # ---------------------------------------------------------------------------
 # boot_done delivery over WebSocket (2026-10-11 follow-up incident)
 #

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from pathlib import Path
@@ -9,6 +10,8 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from jarvis.config.settings import DB_FILE
 from jarvis.memory.schemas import ConversationEntry, TaskRecord
+
+log = logging.getLogger("jarvis.memory.db")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS memory (
@@ -46,10 +49,30 @@ class Database:
 
     def __init__(self, db_path: Path = DB_FILE):
         self.path = Path(db_path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._persistent = True
+        conn: Optional[sqlite3.Connection] = None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(self.path), check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+        except (OSError, sqlite3.Error) as exc:
+            # Serverless filesystems are read-only outside /tmp. Degrade to a
+            # per-instance in-memory database instead of 500ing every request
+            # (observed in production: GET /api/history -> 500).
+            log.warning(
+                "database at %s unavailable (%s); falling back to in-memory "
+                "database (state will not persist across instances)",
+                self.path, exc,
+            )
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+            self._persistent = False
+            conn = sqlite3.connect(":memory:", check_same_thread=False)
+        self._conn = conn
         self._conn.execute("PRAGMA busy_timeout=5000")
         with self._lock:
             self._conn.executescript(_SCHEMA)
