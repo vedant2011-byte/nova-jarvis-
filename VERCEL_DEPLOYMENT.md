@@ -151,6 +151,46 @@ Nothing sensitive is written into the repo or this config.
 4. Do NOT point a real domain at this expecting full desktop control — see
    the capability table above.
 
+## Incident 2026-10-11: black screen ("INITIALIZING JARVIS" forever)
+
+**Symptom**: HUD loaded, but stayed on the boot screen forever; every
+`/api/*` request returned `500 FUNCTION_INVOCATION_FAILED`.
+
+**Root cause**: Vercel bundles only the `api` service root's contents, so in
+the deployed function `vercel_entry.py` sits at the bundle root with no
+`jarvis/` directory above it. The entrypoint's old shim
+(`Path(__file__).resolve().parent.parent`) therefore pointed outside the
+bundle, `from jarvis.backend.server import app` raised
+`ModuleNotFoundError: No module named 'jarvis'`, and every invocation died at
+import — so the HUD's WebSocket never connected and the `boot_done` event
+that unmounts the boot screen never arrived. Reproduced locally in a
+cloud-only venv against a flattened bundle copy before fixing.
+
+**Fixes**:
+- `jarvis/vercel_entry.py` now resolves BOTH layouts: if the repo-style
+  `jarvis/` package is found next to/above the entrypoint it is put on
+  `sys.path`; otherwise the service root itself is registered as the
+  `jarvis` package (the deployed-bundle case).
+- `jarvis/config/settings.py`: a failed `mkdir` of the data dir (read-only
+  serverless FS, e.g. when env vars from the table below are not set) no
+  longer crashes at import — settings stay in memory, honestly unpersisted.
+- HUD: a boot watchdog (12 s) can no longer hang forever. If the backend
+  doesn't finish booting, the boot screen shows CONNECTION FAILED with the
+  exact reason (unreachable vs. reachable-but-link-not-ready) and a RETRY
+  button; it never fakes a connected state. Timeouts added to boot probes
+  (`AbortController`). Tests: `jarvis/tests/test_vercel_deployment.py`
+  (flattened-bundle import, repo-layout import, read-only data dir) and
+  `jarvis/frontend/src/__tests__/boot.test.ts` (startup success, API
+  failure, timeout handling).
+
+**After redeploying, verify** (the deploy log alone is not enough):
+1. `curl https://<your-domain>/api/status` must return **200** with JSON.
+2. Open the site: the boot screen must transition to the HUD within ~3 s.
+3. If it shows CONNECTION FAILED instead, the message tells you which probe
+   failed — a `/ws`-specific failure would appear as "backend responded, but
+   the live event link never became ready" (WebSocket support on Vercel is
+   beta; check that Fluid compute is enabled).
+
 ## Honest limitations / blockers found
 
 - **Desktop-control features cannot work from a cloud function** — that is a

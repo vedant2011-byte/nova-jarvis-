@@ -272,6 +272,24 @@
 .boot-line .ok { color: var(--ok); }
 .boot-line .bad { color: var(--err); }
 @keyframes boot-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }
+.boot-detail { padding: 6px 0; font-size: 12px; letter-spacing: 0.1em; color: var(--err); }
+.boot-detail.muted { color: var(--text-mid); }
+.retry-btn {
+  margin-top: 16px;
+  padding: 8px 26px;
+  background: transparent;
+  border: 1px solid var(--cyan);
+  color: var(--cyan);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.3em;
+  cursor: pointer;
+  transition: box-shadow 0.2s ease, background 0.2s ease;
+}
+.retry-btn:hover {
+  background: rgba(34, 211, 238, 0.12);
+  box-shadow: 0 0 20px rgba(34, 211, 238, 0.35);
+}
 
 /* ---------- responsive ---------- */
 @media (max-width: 1100px) {

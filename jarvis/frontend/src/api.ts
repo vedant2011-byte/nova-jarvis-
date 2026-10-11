@@ -40,11 +40,24 @@ export type TaskPlanUI = {
 
 export type SettingsShape = Record<string, Record<string, unknown>>
 
-export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...init,
-  })
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-  return res.json() as Promise<T>
+export async function api<T>(
+  path: string,
+  init?: RequestInit,
+  timeoutMs?: number,
+): Promise<T> {
+  const ctrl = new AbortController()
+  const timer = timeoutMs
+    ? setTimeout(() => ctrl.abort(new DOMException('timeout', 'TimeoutError')), timeoutMs)
+    : undefined
+  try {
+    const res = await fetch(path, {
+      headers: { 'Content-Type': 'application/json' },
+      ...init,
+      signal: init?.signal ?? ctrl.signal,
+    })
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+    return res.json() as Promise<T>
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ConfirmationRequest, HistoryEntry, SettingsShape, SystemStats, TaskPlanUI } from '../api'
 import { api } from '../api'
+import { BOOT_TIMEOUT_MS, probeBootHealth } from '../bootHealth'
 
 export type UIState =
   | 'boot'
@@ -29,6 +30,8 @@ export function useJarvisStore() {
   const [settings, setSettings] = useState<SettingsShape>({})
   const [status, setStatus] = useState<Partial<import('../api').StatusInfo>>({})
   const [logs, setLogs] = useState<LogLine[]>([])
+  const [bootError, setBootError] = useState<string | null>(null)
+  const [bootNonce, setBootNonce] = useState(0)
   const wsRef = useRef<WebSocket | null>(null)
   const levelRef = useRef(0)
   const stateRef = useRef<UIState>('boot')
@@ -201,7 +204,28 @@ export function useJarvisStore() {
       if (retryTimer) clearTimeout(retryTimer)
       wsRef.current?.close()
     }
-  }, [pushLog])
+  }, [pushLog, bootNonce])
+
+  // -- boot watchdog: never stay on the boot screen forever ---------------
+  useEffect(() => {
+    if (state !== 'boot') return
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      if (cancelled) return
+      void probeBootHealth(api).then(h => {
+        if (cancelled) return
+        setBootError(
+          h.ok
+            ? 'backend responded, but the live event link never became ready'
+            : h.detail,
+        )
+      })
+    }, BOOT_TIMEOUT_MS)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [state, bootNonce])
 
   // -- mic level: real voice_level events when listening, gentle motion otherwise --
   useEffect(() => {
@@ -277,6 +301,12 @@ export function useJarvisStore() {
       .catch(() => undefined)
   }, [])
 
+  const retryBoot = useCallback(() => {
+    setBootError(null)
+    setState('boot')
+    setBootNonce(n => n + 1)
+  }, [])
+
   const clearHistory = useCallback(async () => {
     await api('/api/history', { method: 'DELETE' }).catch(() => undefined)
     setHistory([])
@@ -294,9 +324,9 @@ export function useJarvisStore() {
 
   return {
     state, stateText, actionText, connected, stats, history, plan, confirmation,
-    level, settings, status, logs,
+    level, settings, status, logs, bootError,
     sendCommand, confirm, stop, ptt, testMic, updateSettings, clearHistory, refreshStatus,
-    setHistory,
+    retryBoot, setHistory,
   }
 }
 

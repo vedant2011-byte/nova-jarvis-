@@ -210,7 +210,12 @@ class Settings:
                     self._deep_merge(self._data, disk)
                 except (json.JSONDecodeError, OSError) as exc:
                     print(f"[settings] failed to load {self.path}: {exc}; using defaults", file=sys.stderr)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                # read-only filesystem (e.g. serverless functions): keep
+                # settings in memory instead of crashing at import time
+                print(f"[settings] cannot create {self.path.parent}: {exc}; settings will not persist", file=sys.stderr)
 
     def save(self) -> None:
         with self._lock:

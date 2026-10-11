@@ -147,7 +147,9 @@ export function Hud({ intensity }: { intensity: number }) {
       </footer>
 
       {settingsOpen && <SettingsModal store={store} onClose={() => setSettingsOpen(false)} />}
-      {store.state === 'boot' && <BootScreen logs={store.logs} />}
+      {store.state === 'boot' && (
+        <BootScreen logs={store.logs} error={store.bootError} onRetry={store.retryBoot} />
+      )}
     </div>
   )
 }
