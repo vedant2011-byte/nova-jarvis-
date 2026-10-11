@@ -9,6 +9,7 @@ never received its ``boot_done`` event.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib
 import os
 import shutil
@@ -85,3 +86,94 @@ def test_settings_survives_unwritable_data_dir(tmp_path) -> None:
     assert s.get("server.port") == 8765
     # saving must also fail loudly-but-safely (no exception escapes)
     s.set("general.assistant_name", "JARVIS-TEST")
+
+
+# ---------------------------------------------------------------------------
+# boot_done delivery over WebSocket (2026-10-11 follow-up incident)
+#
+# The entrypoint fix restored HTTP, but the HUD still reported the backend
+# offline: the boot sequence emits `boot_done` EXACTLY ONCE at startup, and
+# with serverless cold starts the WebSocket frequently attaches to an
+# instance whose boot already finished — zero subscribers, event lost, HUD
+# waits forever. The bus must replay boot lifecycle events to late
+# subscribers.
+# ---------------------------------------------------------------------------
+def _drain(q: asyncio.Queue) -> list:
+    out = []
+    while True:
+        try:
+            out.append(q.get_nowait())
+        except asyncio.QueueEmpty:
+            return out
+
+
+def test_boot_events_replayed_to_late_subscriber() -> None:
+    """A subscriber attaching AFTER boot completed must still see boot_done."""
+    from jarvis.backend.events.bus import EventBus
+
+    bus = EventBus()
+    bus.emit("boot", {"total": 1})
+    bus.emit("boot_step", {"name": "SECURITY", "ok": True})
+    bus.emit("boot_done", {})
+
+    q = bus.subscribe()  # late subscriber — the serverless WS case
+    types = [e["type"] for e in _drain(q)]
+    assert types == ["boot", "boot_step", "boot_done"]
+
+
+def test_live_subscriber_gets_no_duplicates() -> None:
+    """A subscriber attached BEFORE boot must not receive events twice."""
+    from jarvis.backend.events.bus import EventBus
+
+    bus = EventBus()
+    live = bus.subscribe()
+    bus.emit("boot_done", {})
+    assert [e["type"] for e in _drain(live)] == ["boot_done"]
+
+    late = bus.subscribe()
+    assert [e["type"] for e in _drain(late)] == ["boot_done"]
+
+
+def test_boot_history_is_bounded() -> None:
+    """Replay history must stay bounded (no unbounded serverless memory use)."""
+    from jarvis.backend.events.bus import EventBus, _BOOT_HISTORY_LIMIT
+
+    bus = EventBus()
+    for i in range(_BOOT_HISTORY_LIMIT * 3):
+        bus.emit("boot_step", {"name": f"S{i}", "ok": True})
+    assert len(bus._boot_history) <= _BOOT_HISTORY_LIMIT
+    q = bus.subscribe()
+    assert len(_drain(q)) <= _BOOT_HISTORY_LIMIT
+
+
+def test_non_boot_events_are_not_replayed() -> None:
+    """Only boot lifecycle events are retained; live traffic stays live-only."""
+    from jarvis.backend.events.bus import EventBus
+
+    bus = EventBus()
+    bus.emit("state", {"state": "idle"})
+    bus.emit("system_stats", {"cpu": 1})
+    assert _drain(bus.subscribe()) == []
+
+
+def test_ws_receives_boot_done_after_startup() -> None:
+    """End-to-end (production shape): REST first, then a fresh WebSocket.
+
+    Startup (which emits boot_done) runs before the WS connects — exactly the
+    deployed cold-start sequence that left the HUD waiting forever.
+    """
+    from fastapi.testclient import TestClient
+    from jarvis.backend.server import app
+
+    with TestClient(app) as client:
+        # REST works (the probe that already succeeded in production)
+        assert client.get("/api/status").status_code == 200
+        with client.websocket_connect("/ws") as ws:
+            types = []
+            for _ in range(50):  # bounded: hello + boot replay + live chatter
+                msg = ws.receive_json()
+                types.append(msg["type"])
+                if msg["type"] == "boot_done":
+                    break
+            assert "boot_done" in types, f"boot_done missing; got {types}"
+            assert types[0] == "hello", types

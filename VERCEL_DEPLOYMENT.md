@@ -222,3 +222,35 @@ cloud-only venv against a flattened bundle copy before fixing.
   (`https://openapi.vercel.sh/vercel.json`, zero violations), Linux wheel
   sizes measured with `pip download --platform manylinux… --python-version
   3.13`, and 115/116 tests passing after every change.
+
+## Incident 2026-10-11 (follow-up): "backend responded, but the live event link never became ready"
+
+**Symptom**: after the entrypoint fix, REST (`/api/status`) answered 200
+and the WebSocket handshake succeeded (`wss://…/ws` → 101 + `hello`
+frame), but the HUD watchdog still reported the live link failed —
+`boot_done` never arrived.
+
+**Root cause**: the boot sequence emits `boot_done` EXACTLY ONCE during
+server startup ([server.py](jarvis/backend/server.py) `_boot_sequence`),
+and `EventBus` had no replay — events emitted with zero subscribers are
+lost. On serverless, the WebSocket frequently attaches to an instance
+(REST probe and WS may even land on different cold instances) whose boot
+sequence already finished, so `boot_done` was gone before the HUD ever
+connected. Reproduced locally against a real uvicorn server: REST first,
+WS after ~7 s → `boot_done received: False`.
+
+**Fix**: `EventBus` now retains the boot lifecycle events (`boot`,
+`boot_step`, `boot_done`, bounded to 100) and replays them to every new
+subscriber on connect. Live subscribers get no duplicates; non-boot
+traffic is unaffected. After the fix, the same local repro delivers
+`hello → boot → 5×boot_step → boot_done` immediately on connect.
+
+**Verified**: 123 pytest passed / 1 skipped (5 new regression tests,
+including an end-to-end `TestClient` WS connect after startup), vitest
+8/8, frontend production build exit 0.
+
+**Post-deploy check**: `curl -s -o /dev/null -w '%{http_code}'
+https://nova-jarvis-pi.vercel.app/api/status` → `200`, then load the HUD
+in a fresh tab (hard refresh) — it must reach `SYSTEM READY` within
+~3 s without pressing RETRY, even though the backend booted before the
+page connected.
