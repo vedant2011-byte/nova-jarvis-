@@ -58,7 +58,9 @@ TURNS = [
 
 POST_TIMEOUT = 45.0       # server waits <=25s (command_wait_s); plus margin
 WS_WAIT_S = 12.0          # live event grace period before falling back
-HISTORY_DEADLINE_S = 40.0 # fallback polling budget from turn start
+HISTORY_DEADLINE_S = 75.0 # fallback polling budget from turn start
+                          # (the real HUD polls up to 120 s; workers under
+                          # Gemini load were observed running 40-60 s)
 HISTORY_POLL_S = 2.5
 HELLO_TIMEOUT = 15.0
 PACE_S = 1.0              # human-like cadence (avoids quota throttling)

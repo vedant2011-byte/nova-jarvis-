@@ -266,6 +266,12 @@ def _submit_user_command(text: str, source: str = "text",
             log.exception("command processing failed")
             fallback = f"Something went wrong while processing that: {exc}"
             speak_text(fallback)
+            # Persist the fallback so the history fallback channel (used when
+            # WS events are lost to instance affinity) can still surface it.
+            try:
+                memory.remember_conversation("jarvis", fallback, source)
+            except Exception:  # noqa: BLE001
+                log.exception("failed to record fallback reply in history")
             out = {"reply": fallback, "error": True}
         finally:
             if run is not None:
@@ -611,10 +617,13 @@ async def ws_endpoint(ws: WebSocket) -> None:
             msg = await ws.receive_json()
             await _handle_ws_message(ws, msg)
 
-    tasks = [asyncio.create_task(coro()) for coro in (_broadcaster, _pinger, _receiver)]
+    tasks: list[asyncio.Task] = []
     try:
-        # initial snapshot
+        # Initial snapshot FIRST. Clients (and the boot-replay tests) require
+        # `hello` to be the opening frame — creating the broadcaster before
+        # this send raced replay events ahead of it.
         await ws.send_json({"type": "hello", "data": {"state": state_snapshot()}})
+        tasks = [asyncio.create_task(coro()) for coro in (_broadcaster, _pinger, _receiver)]
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
         for t in done:
             exc = t.exception()
