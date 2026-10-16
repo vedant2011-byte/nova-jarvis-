@@ -300,9 +300,17 @@
      control reachable. */
   .main-row {
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto auto;
+    /* min-content, NOT auto: with the definite container height, auto
+       tracks shrink-fit to equal thirds and the core section's content
+       spilled across the status panel, which then covered SEND. */
+    grid-template-rows: min-content min-content min-content;
+    align-content: start;
     overflow-y: auto;
   }
+  /* chat input first when stacked: the form must be visible and
+     clickable without scrolling (it used to sit under the status panel) */
+  .core-area { order: -1; }
+  .ai-core-canvas { width: min(34vh, 100%); }
   .panel { max-height: 30vh; }
   .task-panel { display: none; }
 }
