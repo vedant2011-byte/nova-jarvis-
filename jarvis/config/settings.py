@@ -162,7 +162,9 @@ DEFAULTS: Dict[str, Any] = {
         "temperature": 0.2,
         "num_ctx": 4096,
         "request_timeout": 60,
-        "command_wait_s": 15,            # how long POST /api/command waits for the reply
+        "command_wait_s": 25,            # how long POST /api/command waits for the reply
+        # (Gemini under load + planner's sequential calls can exceed 15 s;
+        # the client additionally polls history as a fallback channel)
         "response_length": "concise",     # concise | normal | detailed
         "max_tool_iterations": 6,
         "fallback_to_intent_engine": True,

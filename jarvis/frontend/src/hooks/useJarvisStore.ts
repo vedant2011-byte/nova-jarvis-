@@ -311,11 +311,11 @@ export function useJarvisStore() {
     onNote: message => pushLog(message, 'sys'),
     onFail: message => {
       pushLog(message, 'sys')
-      if (STUCK_STATES.includes(stateRef.current)) {
-        setState('idle')
-        setStateText('SYSTEM ONLINE')
-        setActionText('')
-      }
+      // always settle to a usable state AND say so — a failure that reverts
+      // to "SYSTEM ONLINE" looks like nothing went wrong
+      if (STUCK_STATES.includes(stateRef.current)) setState('idle')
+      setStateText('SEND FAILED — TRY AGAIN')
+      setActionText('')
     },
   }), [pushLog])
 
@@ -341,8 +341,16 @@ export function useJarvisStore() {
       },
       onError: (code, message) => {
         pushLog(`voice: ${message}`, 'sys')
-        // empty/no-speech end normally — onEnd settles the state
-        if (code === 'empty' || code === 'no-speech') return
+        // empty/no-speech (and browsers that end silently when the mic is
+        // blocked) must give VISIBLE feedback — logs are only shown during boot
+        if (code === 'empty' || code === 'no-speech') {
+          setStateText(
+            code === 'empty' ? 'NOTHING HEARD — TRY AGAIN' : 'NO SPEECH DETECTED — TRY AGAIN',
+          )
+          if (stateRef.current === 'listening') setState('idle')
+          setActionText('')
+          return
+        }
         terminalError = true
         if (stateRef.current === 'listening') setState('idle')
         setStateText(
