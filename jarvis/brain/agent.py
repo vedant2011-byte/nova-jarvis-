@@ -131,7 +131,15 @@ class JarvisAgent:
 
         self.reset_cancel()
         if not self._busy.acquire(blocking=False):
-            return {"reply": "I'm still working on the previous task.", "state": "busy"}
+            # The engine is mid-task. Say so out loud — this path used to
+            # return silently, so the UI saw no echo and no reply and looked
+            # dead. "emitted" tells the server not to re-echo the reply.
+            busy_reply = "I'm still working on the previous task. " \
+                         "Give me a moment, or press STOP to interrupt."
+            self.emit("conversation", {"role": "user", "content": text.strip(), "source": source})
+            self.emit("conversation", {"role": "jarvis", "content": busy_reply, "source": "agent"})
+            self.emit("state", {"state": "idle"})
+            return {"reply": busy_reply, "state": "busy", "emitted": True}
 
         try:
             return self._process_inner(text.strip(), source)
@@ -176,6 +184,9 @@ class JarvisAgent:
             "tool_calls": tool_calls,
             "llm_online": llm_online,
             "elapsed_ms": elapsed,
+            # This path already emitted its conversation events; the server
+            # must not echo the reply a second time.
+            "emitted": True,
         }
 
     # ------------------------------------------------------------------

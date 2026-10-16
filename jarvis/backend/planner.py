@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional
 from jarvis.brain import llm
 from jarvis.brain.agent import JarvisAgent
 from jarvis.config.settings import get_settings
+from jarvis.memory import manager as memory
 from jarvis.memory.schemas import TaskRecord, TaskStep
 
 log = logging.getLogger("jarvis.backend.planner")

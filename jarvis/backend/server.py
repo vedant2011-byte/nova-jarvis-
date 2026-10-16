@@ -10,6 +10,7 @@ All heavy work (STT, LLM, tools) runs off the event loop; the UI stays fluid.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import logging.handlers
@@ -187,13 +188,45 @@ _APPROVE_RE = re.compile(r"\b(approve|approved|approve it|confirm|confirmed|yes|
 _DENY_RE = re.compile(r"\b(deny|denied|cancel|cancelled|canceled|reject|abort|no|don't|do not|stop)\b", re.I)
 
 
-def _submit_user_command(text: str, source: str = "text") -> None:
-    """Run a user command through planner/agent on a worker thread."""
+class _CommandRun:
+    """Handle for one dispatched command.
+
+    Lets the REST path wait (bounded) for the worker thread's result so the
+    reply travels back in the HTTP response itself. This matters on
+    serverless: events emitted on the instance that ran the command only
+    reach WebSockets attached to that same instance, so a response that
+    relied solely on WS events silently lost replies when the platform
+    routed the POST to a different warm instance.
+    """
+
+    __slots__ = ("event", "out")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.out: Dict[str, Any] = {}
+
+    def finish(self, out: Dict[str, Any]) -> None:
+        self.out = out
+        self.event.set()
+
+
+def _submit_user_command(text: str, source: str = "text",
+                         run: Optional[_CommandRun] = None) -> None:
+    """Run a user command through planner/agent on a worker thread.
+
+    Fire-and-forget by default (voice + WebSocket paths); pass ``run`` to
+    let a caller await the result with a bounded wait.
+    """
     if not text.strip():
+        if run is not None:
+            run.finish({"reply": "", "accepted": False})
         return
     if len(text) > 4000:
         # WS / voice paths skip pydantic — bound them here too.
         bus.emit_threadsafe("error", {"message": "Message too long — maximum 4000 characters."})
+        if run is not None:
+            run.finish({"reply": "Message too long — maximum 4000 characters.",
+                        "accepted": False})
         return
 
     # Voice/UI answers to a pending confirmation bypass the agent's busy lock.
@@ -203,14 +236,19 @@ def _submit_user_command(text: str, source: str = "text") -> None:
         if _APPROVE_RE.search(text):
             if confirmations.resolve_latest(True):
                 bus.emit_threadsafe("confirmation_resolved", {"approved": True})
+                if run is not None:
+                    run.finish({"reply": "", "accepted": True, "handled": "confirmation"})
                 return
         elif _DENY_RE.search(text):
             if confirmations.resolve_latest(False):
                 bus.emit_threadsafe("confirmation_resolved", {"approved": False})
+                if run is not None:
+                    run.finish({"reply": "", "accepted": True, "handled": "confirmation"})
                 return
 
     def _work() -> None:
         assert planner is not None and agent is not None
+        out: Dict[str, Any] = {}
         try:
             if agent.cancel_flag.cancelled:
                 agent.reset_cancel()
@@ -220,19 +258,28 @@ def _submit_user_command(text: str, source: str = "text") -> None:
                 out = agent.process_text(text, source)
             reply = out.get("reply", "")
             if reply:
-                speak_text(reply)
-        except Exception:  # noqa: BLE001
+                # The agent already emitted its own conversation event for
+                # this reply ("emitted"): echoing it here used to duplicate
+                # every message in the UI.
+                speak_text(reply, echo=not out.get("emitted", False))
+        except Exception as exc:  # noqa: BLE001
             log.exception("command processing failed")
-            speak_text("Something went wrong while processing that.")
+            fallback = f"Something went wrong while processing that: {exc}"
+            speak_text(fallback)
+            out = {"reply": fallback, "error": True}
+        finally:
+            if run is not None:
+                run.finish(out)
 
     threading.Thread(target=_work, daemon=True, name="agent-work").start()  # daemon
 
 
-def speak_text(text: str) -> None:
+def speak_text(text: str, echo: bool = True) -> None:
     if not text:
         return
     bus.emit_threadsafe("state", {"state": "speaking"})
-    bus.emit_threadsafe("conversation", {"role": "jarvis", "content": text, "source": "tts"})
+    if echo:
+        bus.emit_threadsafe("conversation", {"role": "jarvis", "content": text, "source": "tts"})
 
     def _after() -> None:
         # Do not stomp a newer pipeline state (e.g. a pending confirmation).
@@ -347,8 +394,25 @@ def _browser_available() -> bool:
 
 @app.post("/api/command")
 async def api_command(cmd: CommandIn) -> JSONResponse:
-    _submit_user_command(cmd.text, cmd.source)
-    return JSONResponse({"accepted": True})
+    """Accept a command and wait (bounded) for its result.
+
+    The reply rides back in the HTTP response so chat keeps working even
+    when live WebSocket events are lost (e.g. serverless instance
+    affinity). `done:false` means the worker is still running — the reply
+    will still arrive as an event / in history; the client must stay usable.
+    """
+    run = _CommandRun()
+    _submit_user_command(cmd.text, cmd.source, run=run)
+    wait_s = max(0.5, float(settings.get("ai.command_wait_s", 15)))
+    finished = await asyncio.to_thread(run.event.wait, wait_s)
+    payload: Dict[str, Any] = {
+        "accepted": bool(run.out.get("accepted", True)),
+        "done": bool(finished),
+        "reply": str(run.out.get("reply", "") or "") if finished else "",
+    }
+    if run.out.get("handled"):
+        payload["handled"] = run.out["handled"]
+    return JSONResponse(payload)
 
 
 @app.post("/api/confirm")
@@ -518,33 +582,54 @@ async def api_shutdown() -> JSONResponse:
 # ---------------------------------------------------------------------------
 # WebSocket
 # ---------------------------------------------------------------------------
+WS_PING_INTERVAL_S = 20.0
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     queue = bus.subscribe()
+
+    async def _broadcaster() -> None:
+        # Forward bus events to this client. Awaited queue.get (no polling),
+        # so a slow client can't busy-spin the loop.
+        while True:
+            event = await queue.get()
+            await ws.send_json(event)
+
+    async def _pinger() -> None:
+        # Server-initiated keepalive: serverless proxies and load balancers
+        # kill silently idle WebSockets (production showed close code 1006
+        # after ~2 minutes of silence). Periodic traffic keeps the pipe warm
+        # and gives the client a liveness signal to watchdog against.
+        while True:
+            await asyncio.sleep(WS_PING_INTERVAL_S)
+            await ws.send_json({"type": "ping", "ts": time.time()})
+
+    async def _receiver() -> None:
+        while True:
+            msg = await ws.receive_json()
+            await _handle_ws_message(ws, msg)
+
+    tasks = [asyncio.create_task(coro()) for coro in (_broadcaster, _pinger, _receiver)]
     try:
         # initial snapshot
         await ws.send_json({"type": "hello", "data": {"state": state_snapshot()}})
-        while True:
-            # broadcast queued events
-            try:
-                event = queue.get_nowait()
-                await ws.send_json(event)
-                continue
-            except asyncio.QueueEmpty:
-                pass
-            # receive client messages with short timeout
-            try:
-                msg = await asyncio.wait_for(ws.receive_json(), timeout=0.1)
-            except asyncio.TimeoutError:
-                await asyncio.sleep(0.05)
-                continue
-            await _handle_ws_message(ws, msg)
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for t in done:
+            exc = t.exception()
+            if exc is not None and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
+                log.error("websocket task failed: %s", exc)
     except WebSocketDisconnect:
         pass
     except Exception:  # noqa: BLE001
         log.exception("websocket error")
     finally:
+        for t in tasks:
+            t.cancel()
+        for t in tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await t
         bus.unsubscribe(queue)
 
 

@@ -2,6 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import type { StatusInfo } from '../api'
 import type { JarvisStore } from '../hooks/useJarvisStore'
+import { browserSpeechSupported } from '../voice/browserSpeech'
+
+// evaluated once — is this browser able to transcribe on its own mic?
+const HAS_BROWSER_SR = browserSpeechSupported()
 
 type Tab = 'voice' | 'ai' | 'wake' | 'memory' | 'permissions' | 'appearance' | 'system'
 
@@ -232,9 +236,29 @@ function VoiceTab({ store }: { store: JarvisStore }) {
         </div>
       </Field>
       {stt && !stt.available && (
-        <Field label="SPEECH RECOGNITION" hint="Voice input needs this local package">
-          <span style={{ fontSize: 11, color: 'var(--warn, #fbbf24)' }}>
-            Unavailable — run: {stt.install_hint ?? 'pip install faster-whisper'}
+        HAS_BROWSER_SR ? (
+          <Field
+            label="SPEECH RECOGNITION"
+            hint="Backend STT package not installed — using your browser's own dictation instead"
+          >
+            <span style={{ fontSize: 11, color: 'var(--ok, #34d399)' }}>
+              Browser speech recognition ready — click MIC or hold CTRL+SPACE and speak.
+              No install needed.
+            </span>
+          </Field>
+        ) : (
+          <Field label="SPEECH RECOGNITION" hint="Local package for offline voice in the desktop app">
+            <span style={{ fontSize: 11, color: 'var(--warn, #fbbf24)' }}>
+              Unavailable — this browser has no speech recognition; use Chrome/Edge,
+              or in the desktop app run: {stt.install_hint ?? 'pip install faster-whisper'}
+            </span>
+          </Field>
+        )
+      )}
+      {stt && stt.available && (
+        <Field label="SPEECH RECOGNITION" hint="Local engine for the desktop app">
+          <span style={{ fontSize: 11, color: 'var(--ok, #34d399)' }}>
+            {stt.engine || 'Local STT'} ready{HAS_BROWSER_SR ? ' — browsers with dictation support use their own mic instead' : ''}
           </span>
         </Field>
       )}
@@ -317,7 +341,9 @@ function WakeTab({ store }: { store: JarvisStore }) {
       </Field>
       {wwAvailable === false && (
         <p style={{ fontSize: 12, color: 'var(--warn, #fbbf24)' }}>
-          Wake-word engine unavailable — push-to-talk still works. Run: pip install faster-whisper
+          Wake-word engine unavailable (needs the backend mic pipeline) —
+          push-to-talk still works, and browsers with dictation support (Chrome/Edge)
+          transcribe entirely on your own mic.
         </p>
       )}
       <p style={{ fontSize: 12, color: 'var(--text-low)', lineHeight: 1.6 }}>

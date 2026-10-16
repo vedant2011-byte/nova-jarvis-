@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ConfirmationRequest, HistoryEntry, SettingsShape, SystemStats, TaskPlanUI } from '../api'
 import { api } from '../api'
 import { BOOT_TIMEOUT_MS, probeBootHealth } from '../bootHealth'
+import { createWsLink, type WsLink } from '../net/wsLink'
+import { createCommandSender } from '../net/commandSender'
+import { BrowserSpeech, browserSpeechSupported, defaultSpeechCtor } from '../voice/browserSpeech'
 
 export type UIState =
   | 'boot'
@@ -16,6 +19,27 @@ export type UIState =
   | 'stopped'
 
 export type LogLine = { ts: number; text: string; kind: 'in' | 'out' | 'sys' }
+
+/** A reply for a POST can only reach this client over the WS of the
+ * instance-local link; these states must never survive a link recovery. */
+export const STUCK_STATES: readonly UIState[] = [
+  'thinking', 'executing', 'speaking', 'transcribing', 'listening', 'error',
+]
+
+/** Everything the UI must let go when the event link is replaced: the old
+ * connection is gone with any confirmation/plan it was tracking. */
+export const RESET_ON_RECONNECT: readonly UIState[] = [...STUCK_STATES, 'confirmation']
+
+/** Append a conversation entry unless it duplicates the immediate previous
+ * one (the same entry arrives from both the HTTP reply and the WS event). */
+export function appendConversationEntry(
+  prev: HistoryEntry[],
+  entry: HistoryEntry,
+): HistoryEntry[] {
+  const last = prev[prev.length - 1]
+  if (last && last.role === entry.role && last.content === entry.content) return prev
+  return [...prev.slice(-80), entry].slice(-80) // hard cap at 80 entries
+}
 
 export function useJarvisStore() {
   const [state, setState] = useState<UIState>('boot')
@@ -32,52 +56,55 @@ export function useJarvisStore() {
   const [logs, setLogs] = useState<LogLine[]>([])
   const [bootError, setBootError] = useState<string | null>(null)
   const [bootNonce, setBootNonce] = useState(0)
-  const wsRef = useRef<WebSocket | null>(null)
+  const linkRef = useRef<WsLink | null>(null)
+  const handleRef = useRef<((msg: { type: string; data: any }) => void) | null>(null)
   const levelRef = useRef(0)
   const stateRef = useRef<UIState>('boot')
   stateRef.current = state
 
   const pushLog = useCallback((text: string, kind: LogLine['kind'] = 'sys') => {
-    setLogs(prev => [...prev.slice(-120), { ts: Date.now(), text, kind }])
+    setLogs(prev => {
+      const last = prev[prev.length - 1]
+      // the same entry can arrive twice (optimistic echo + WS event);
+      // an identical consecutive line inside 3 s is that duplicate
+      if (last && last.text === text && Date.now() - last.ts < 3000) return prev
+      return [...prev.slice(-120), { ts: Date.now(), text, kind }]
+    })
   }, [])
 
-  // -- websocket -------------------------------------------------------
+  // -- websocket: resilient link (app ping, staleness watchdog, backoff) ---
   useEffect(() => {
-    let closed = false
-    let retryTimer: number | undefined
-
-    const connect = () => {
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-      const ws = new WebSocket(`${proto}://${location.host}/ws`)
-      wsRef.current = ws
-
-      ws.onopen = () => {
-        if (closed) return
-        setConnected(true)
+    const link = createWsLink({
+      url: `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`,
+      onStatus: connectedNow => setConnected(connectedNow),
+      onOpen: () => {
         pushLog('link established', 'sys')
+        // a recovered link must never leave a loading state stuck: any
+        // in-flight task, confirmation or plan died with the old connection,
+        // so settle the UI and resync full state (history/settings/status)
+        if (RESET_ON_RECONNECT.includes(stateRef.current)) {
+          setState('idle')
+          setStateText('SYSTEM ONLINE')
+          setActionText('')
+          setConfirmation(null)
+          setPlan(null)
+        }
         api<{ entries: HistoryEntry[] }>('/api/history?limit=60')
           .then(r => setHistory(r.entries.slice(-40)))
           .catch(() => undefined)
         api<{ settings: SettingsShape }>('/api/settings')
           .then(r => setSettings(r.settings))
           .catch(() => undefined)
-      }
-
-      ws.onmessage = evt => {
-        try {
-          handle(JSON.parse(evt.data))
-        } catch {
-          /* ignore malformed */
-        }
-      }
-
-      ws.onclose = () => {
-        if (closed) return
-        setConnected(false)
-        retryTimer = window.setTimeout(connect, 1500)
-      }
-      ws.onerror = () => ws.close()
-    }
+        api<import('../api').StatusInfo>('/api/status')
+          .then(s => setStatus(s))
+          .catch(() => undefined)
+      },
+      onMessage: data => handleRef.current?.(data as { type: string; data: any }),
+      onClose: () => pushLog('link dropped — reconnecting…', 'sys'),
+    })
+    linkRef.current = link
+    const goOnline = () => link.reconnectNow()
+    window.addEventListener('online', goOnline)
 
     const handle = (msg: { type: string; data: any }) => {
       const d = msg.data ?? {}
@@ -135,12 +162,12 @@ export function useJarvisStore() {
             ts: (d.ts ?? Date.now() / 1000) * 1000,
             source: d.source ?? 'text',
           }
-          setHistory(prev => {
-            const last = prev[prev.length - 1]
-            if (last && last.role === entry.role && last.content === entry.content) return prev
-            return [...prev.slice(-80), entry]
-          })
-          pushLog(`${d.role}: ${d.content}`, d.role === 'user' ? 'in' : 'out')
+          setHistory(prev => appendConversationEntry(prev, entry))
+          // same text as the optimistic echo ("you:") → don't log twice
+          pushLog(
+            d.role === 'user' ? `you: ${d.content}` : `jarvis: ${d.content}`,
+            d.role === 'user' ? 'in' : 'out',
+          )
           break
         }
         case 'task_started':
@@ -169,6 +196,8 @@ export function useJarvisStore() {
         case 'voice_error':
           pushLog(`voice: ${d.error}`, 'sys')
           setStateText('MIC UNAVAILABLE')
+          // never stay stuck in LISTENING after a mic failure
+          setState(prev => (prev === 'listening' ? 'idle' : prev))
           break
         case 'voice_level':
           if (stateRef.current === 'listening') {
@@ -193,16 +222,26 @@ export function useJarvisStore() {
             .then(r => setSettings(r.settings))
             .catch(() => undefined)
           break
+        case 'error':
+          // provider/link errors must be visible AND must not wedge the UI
+          pushLog(`error: ${d.message ?? d.error ?? 'unknown error'}`, 'sys')
+          if (STUCK_STATES.includes(stateRef.current)) {
+            setState('idle')
+            setStateText('SYSTEM ONLINE')
+            setActionText('')
+          }
+          break
         default:
           break
       }
     }
 
-    connect()
+    handleRef.current = handle
     return () => {
-      closed = true
-      if (retryTimer) clearTimeout(retryTimer)
-      wsRef.current?.close()
+      window.removeEventListener('online', goOnline)
+      link.close()
+      linkRef.current = null
+      handleRef.current = null
     }
   }, [pushLog, bootNonce])
 
@@ -246,12 +285,89 @@ export function useJarvisStore() {
   }, [state])
 
   // -- actions ----------------------------------------------------------
+  // Chat submission: optimistic echo, duplicate-send guard, bounded reply
+  // wait with a history fallback — every success/failure/timeout path
+  // settles the UI so the chat can continue without a refresh.
+  const sender = useMemo(() => createCommandSender({
+    post: text => api<{ accepted?: boolean; done?: boolean; reply?: string; handled?: string }>(
+      '/api/command',
+      { method: 'POST', body: JSON.stringify({ text, source: 'text' }) },
+      45000, // bounded: server waits ≤15 s for a reply, plus network margin
+    ),
+    pollHistory: async () =>
+      (await api<{ entries: HistoryEntry[] }>('/api/history?limit=60')).entries,
+    onEcho: text => {
+      pushLog(`you: ${text}`, 'in')
+      setHistory(prev => appendConversationEntry(prev, {
+        role: 'user', content: text, ts: Date.now(), source: 'text',
+      }))
+    },
+    onReply: text => {
+      pushLog(`jarvis: ${text}`, 'out')
+      setHistory(prev => appendConversationEntry(prev, {
+        role: 'jarvis', content: text, ts: Date.now(), source: 'agent',
+      }))
+    },
+    onNote: message => pushLog(message, 'sys'),
+    onFail: message => {
+      pushLog(message, 'sys')
+      if (STUCK_STATES.includes(stateRef.current)) {
+        setState('idle')
+        setStateText('SYSTEM ONLINE')
+        setActionText('')
+      }
+    },
+  }), [pushLog])
+
   const sendCommand = useCallback((text: string) => {
-    if (!text.trim()) return
-    pushLog(`you: ${text}`, 'in')
-    api('/api/command', { method: 'POST', body: JSON.stringify({ text, source: 'text' }) })
-      .catch(err => pushLog(`send failed: ${err}`, 'sys'))
-  }, [pushLog])
+    void sender.send(text)
+  }, [sender])
+
+  // Voice input: browser-native recognition when the browser supports it
+  // (works against the serverless deployment — no server mic needed);
+  // otherwise the backend push-to-talk pipeline for the local desktop app.
+  const speech = useMemo(() => {
+    let terminalError = false
+    return new BrowserSpeech(defaultSpeechCtor(), {
+      onStart: () => {
+        terminalError = false
+        setState('listening')
+        setStateText('LISTENING...')
+        pushLog('listening — speak now', 'sys')
+      },
+      onFinal: text => {
+        pushLog(`heard: ${text}`, 'in')
+        void sendCommand(text)
+      },
+      onError: (code, message) => {
+        pushLog(`voice: ${message}`, 'sys')
+        // empty/no-speech end normally — onEnd settles the state
+        if (code === 'empty' || code === 'no-speech') return
+        terminalError = true
+        if (stateRef.current === 'listening') setState('idle')
+        setStateText(
+          code === 'permission-denied' ? 'MIC PERMISSION DENIED'
+            : code === 'unsupported' ? 'MIC UNSUPPORTED'
+              : 'MIC UNAVAILABLE',
+        )
+        setActionText('')
+      },
+      onEnd: () => {
+        if (!terminalError && stateRef.current === 'listening') {
+          setState('idle')
+          setStateText('SYSTEM ONLINE')
+          setActionText('')
+        }
+        terminalError = false
+      },
+    })
+  }, [pushLog, sendCommand])
+
+  // unmount: never leave timers or recognition sessions behind
+  useEffect(() => () => {
+    sender.dispose()
+    speech.dispose()
+  }, [sender, speech])
 
   const confirm = useCallback(async (approved: boolean) => {
     const conf = confirmation
@@ -263,19 +379,41 @@ export function useJarvisStore() {
   }, [confirmation])
 
   const stop = useCallback(() => {
+    speech.cancel()          // cancel any in-flight dictation
+    sender.dispose()         // cancel any pending reply poll
     api('/api/stop', { method: 'POST' }).catch(() => undefined)
     setStateText('TASK STOPPED')
     setState('idle')
     setPlan(null)
-  }, [])
+  }, [speech, sender])
 
   const ptt = useCallback(async (start: boolean) => {
-    try {
-      await api(start ? '/api/ptt/start' : '/api/ptt/end', { method: 'POST' })
-    } catch {
-      pushLog('push-to-talk failed (mic unavailable?)', 'sys')
+    if (start) {
+      if (browserSpeechSupported()) {
+        // in-browser dictation: mic permission, empty transcripts and
+        // errors are handled by the speech handlers above
+        speech.start()
+        return
+      }
+      // No browser support: backend pipeline — works in the local desktop
+      // app; on serverless there is no mic, so the 503 is reported
+      // honestly instead of failing silently.
+      try {
+        await api('/api/ptt/start', { method: 'POST' })
+      } catch {
+        pushLog('voice input unavailable: this browser has no speech recognition and the backend has no microphone — type your message instead', 'sys')
+        if (stateRef.current === 'listening') setState('idle')
+      }
+    } else if (speech.active) {
+      speech.stop()
+    } else {
+      try {
+        await api('/api/ptt/end', { method: 'POST' })
+      } catch {
+        /* transcript (if any) arrives via the stt_result event */
+      }
     }
-  }, [pushLog])
+  }, [speech, pushLog])
 
   const testMic = useCallback(async () => {
     try {
