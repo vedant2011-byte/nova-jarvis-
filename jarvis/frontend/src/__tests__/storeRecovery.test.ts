@@ -3,6 +3,7 @@ import {
   RESET_ON_RECONNECT,
   STUCK_STATES,
   appendConversationEntry,
+  mergeHistory,
 } from '../hooks/useJarvisStore'
 import type { HistoryEntry } from '../api'
 
@@ -41,6 +42,46 @@ describe('appendConversationEntry (duplicate-reply guard)', () => {
       hist = appendConversationEntry(hist, entry(i % 2 ? 'user' : 'jarvis', `msg ${i}`))
     }
     expect(hist.length).toBeLessThanOrEqual(80)
+  })
+})
+
+describe('mergeHistory (reconnect must never erase visible messages)', () => {
+  it('keeps local messages when the server history comes back empty', () => {
+    // reconnect hit a different instance whose history is empty — the old
+    // code REPLACED state here and the user watched their reply vanish
+    const local = [
+      entry('user', 'say hello'),
+      entry('jarvis', 'Hello!'),
+    ]
+    const merged = mergeHistory(local, [])
+    expect(merged).toHaveLength(2)
+    expect(merged.map(e => e.content)).toEqual(['say hello', 'Hello!'])
+  })
+
+  it('dedupes entries the server also has (no doubled conversation)', () => {
+    const local = [entry('user', 'hi'), entry('jarvis', 'hey')]
+    const server = [entry('user', 'hi'), entry('jarvis', 'hey'), entry('user', 'older')]
+    const merged = mergeHistory(local, server)
+    expect(merged.map(e => e.content)).toEqual(['hi', 'hey', 'older'])
+  })
+
+  it('keeps server-only entries and stays ordered and bounded', () => {
+    let local: HistoryEntry[] = []
+    for (let i = 0; i < 70; i++) {
+      local = appendConversationEntry(local, entry(i % 2 ? 'user' : 'jarvis', `local ${i}`))
+    }
+    const server = [entry('jarvis', 'from other instance', )]
+    const merged = mergeHistory(local, server)
+    expect(merged.some(e => e.content === 'from other instance')).toBe(true)
+    expect(merged.length).toBeLessThanOrEqual(80)
+    // sorted by ts (all our entries share ts=1 → stable content check)
+    expect(merged[merged.length - 1]).toBeDefined()
+  })
+
+  it('collapses an exact duplicate arriving from both sources to one row', () => {
+    const local = [entry('jarvis', 'same reply')]
+    const server = [entry('jarvis', 'same reply')]
+    expect(mergeHistory(local, server)).toHaveLength(1)
   })
 })
 

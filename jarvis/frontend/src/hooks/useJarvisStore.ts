@@ -41,6 +41,24 @@ export function appendConversationEntry(
   return [...prev.slice(-80), entry].slice(-80) // hard cap at 80 entries
 }
 
+/** Merge a server history fetch with what the client already shows.
+ * Replacing instead of merging erased locally-known messages whenever a
+ * reconnect fetched history from a different instance (or an empty one) —
+ * the user saw their just-sent message and its reply disappear, which
+ * reads as “chat stopped working”. */
+export function mergeHistory(local: HistoryEntry[], server: HistoryEntry[]): HistoryEntry[] {
+  const seen = new Set<string>()
+  const out: HistoryEntry[] = []
+  for (const e of [...server, ...local]) {
+    const key = `${e.role} ${e.content}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(e)
+  }
+  out.sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0))
+  return out.slice(-80)
+}
+
 export function useJarvisStore() {
   const [state, setState] = useState<UIState>('boot')
   const [stateText, setStateText] = useState('INITIALIZING')
@@ -90,7 +108,7 @@ export function useJarvisStore() {
           setPlan(null)
         }
         api<{ entries: HistoryEntry[] }>('/api/history?limit=60')
-          .then(r => setHistory(r.entries.slice(-40)))
+          .then(r => setHistory(prev => mergeHistory(prev, r.entries)))
           .catch(() => undefined)
         api<{ settings: SettingsShape }>('/api/settings')
           .then(r => setSettings(r.settings))
@@ -356,7 +374,8 @@ export function useJarvisStore() {
         setStateText(
           code === 'permission-denied' ? 'MIC PERMISSION DENIED'
             : code === 'unsupported' ? 'MIC UNSUPPORTED'
-              : 'MIC UNAVAILABLE',
+              : code === 'timeout' ? 'MIC NO RESPONSE — TRY AGAIN'
+                : 'MIC UNAVAILABLE',
         )
         setActionText('')
       },

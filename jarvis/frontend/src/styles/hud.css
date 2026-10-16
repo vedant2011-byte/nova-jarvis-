@@ -293,7 +293,16 @@
 
 /* ---------- responsive ---------- */
 @media (max-width: 1100px) {
-  .main-row { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; }
+  /* Rows must size to their CONTENT: with a fixed `1fr` core track the
+     core section's content (canvas + form) overflowed its track and the
+     status panel — painted later — covered the SEND button, making chat
+     un-clickable at narrow widths. auto rows + scrolling keep every
+     control reachable. */
+  .main-row {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto;
+    overflow-y: auto;
+  }
   .panel { max-height: 30vh; }
   .task-panel { display: none; }
 }

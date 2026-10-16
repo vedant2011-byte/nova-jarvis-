@@ -74,6 +74,8 @@ type Seen = {
   ends: number
 }
 
+const speeches: BrowserSpeech[] = []
+
 function makeSpeech(ctor: (new () => SpeechRecognitionLike) | null = FakeRec): {
   speech: BrowserSpeech
   seen: Seen
@@ -86,7 +88,9 @@ function makeSpeech(ctor: (new () => SpeechRecognitionLike) | null = FakeRec): {
     onError: (code, message) => seen.errors.push({ code, message }),
     onEnd: () => seen.ends++,
   }
-  return { speech: new BrowserSpeech(ctor, handlers), seen }
+  const speech = new BrowserSpeech(ctor, handlers)
+  speeches.push(speech) // disposed in afterEach → no leaked watchdog timers
+  return { speech, seen }
 }
 
 beforeEach(() => {
@@ -94,6 +98,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  for (const s of speeches) s.dispose()
+  speeches.length = 0
   vi.unstubAllGlobals()
 })
 
@@ -269,5 +275,101 @@ describe('cancellation and cleanup', () => {
     speech.cancel()
     expect(seen.ends).toBe(0)
     expect(FakeRec.instances).toHaveLength(0)
+  })
+})
+
+describe('start watchdog (service never answers)', () => {
+  // Some browser/OS combos fire NO event at all for a blocked mic
+  // (observed on the deployed site) — the watchdog converts that hang
+  // into visible feedback instead of an infinite silent wait.
+
+  it('reports a timeout quickly when permission is known-denied', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.stubGlobal('navigator', {
+        permissions: { query: async () => ({ state: 'denied' }) },
+      })
+      const { speech, seen } = makeSpeech()
+      speech.start()
+      const rec = FakeRec.instances[0]
+      await Promise.resolve() // permission tune resolves → tightens to 3s
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(seen.errors).toEqual([]) // still within the tightened window
+      await vi.advanceTimersByTimeAsync(2500)
+      expect(seen.errors).toHaveLength(1)
+      expect(seen.errors[0].code).toBe('timeout')
+      expect(seen.errors[0].message).toContain('did not respond')
+      expect(speech.active).toBe(false)
+      expect(rec.aborted).toBe(true)
+      rec.fireEnd() // late events from the aborted session are inert
+      expect(seen.ends).toBe(0)
+      expect(seen.errors).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('waits the generous default window when permission state is unknown', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.stubGlobal('navigator', {}) // no permissions API
+      const { speech, seen } = makeSpeech()
+      speech.start()
+      await vi.advanceTimersByTimeAsync(29000)
+      expect(seen.errors).toEqual([]) // a permission prompt may still be open
+      await vi.advanceTimersByTimeAsync(1500)
+      expect(seen.errors).toHaveLength(1)
+      expect(seen.errors[0].code).toBe('timeout')
+      expect(speech.active).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('the first live event clears the watchdog permanently', async () => {
+    vi.useFakeTimers()
+    try {
+      const { speech, seen } = makeSpeech()
+      speech.start()
+      FakeRec.instances[0].fireStart()
+      await vi.advanceTimersByTimeAsync(120000) // far past every window
+      expect(seen.errors).toEqual([])
+      expect(seen.starts).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('an early error event also clears it (no late double-report)', async () => {
+    vi.useFakeTimers()
+    try {
+      const { speech, seen } = makeSpeech()
+      speech.start()
+      await vi.advanceTimersByTimeAsync(500)
+      FakeRec.instances[0].fireError('no-speech')
+      await vi.advanceTimersByTimeAsync(60000) // watchdog must not fire later
+      expect(seen.errors.map(e => e.code)).toEqual(['no-speech'])
+      FakeRec.instances[0].fireEnd() // browsers end after the error
+      expect(seen.errors.map(e => e.code)).toEqual(['no-speech']) // no empty double-report
+      expect(seen.ends).toBe(1)
+      expect(speech.active).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('dispose cancels a pending watchdog (no callback after unmount)', async () => {
+    vi.useFakeTimers()
+    try {
+      const { speech, seen } = makeSpeech()
+      speech.start()
+      speech.dispose()
+      await vi.advanceTimersByTimeAsync(120000)
+      expect(seen.errors).toEqual([])
+      expect(seen.ends).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

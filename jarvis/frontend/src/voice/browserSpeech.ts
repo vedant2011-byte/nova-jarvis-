@@ -19,6 +19,7 @@ export type SpeechErrorCode =
   | 'network'
   | 'unsupported'
   | 'empty'
+  | 'timeout'
   | 'unknown'
 
 export type SpeechHandlers = {
@@ -71,6 +72,9 @@ export class BrowserSpeech {
   private lastSubmitted = { text: '', at: 0 }
   private cancelling = false
   private sawError = false
+  /** First meaningful event (start/error/end) arrived from the service. */
+  private sessionLive = false
+  private watchdog: ReturnType<typeof setTimeout> | null = null
 
   constructor(
     private readonly ctor: SpeechCtor | null,
@@ -107,13 +111,24 @@ export class BrowserSpeech {
     this.finalsThisSession = 0
     this.cancelling = false
     this.sawError = false
+    this.sessionLive = false
     rec.onstart = () => {
+      this.sessionLive = true
+      this.clearWatchdog()
       this.activeFlag = true
       this.handlers.onStart?.()
     }
     rec.onresult = (event: unknown) => this.handleResult(event)
-    rec.onerror = (event: unknown) => this.handleError(event)
-    rec.onend = () => this.handleEnd()
+    rec.onerror = (event: unknown) => {
+      this.sessionLive = true
+      this.clearWatchdog()
+      this.handleError(event)
+    }
+    rec.onend = () => {
+      this.sessionLive = true
+      this.clearWatchdog()
+      this.handleEnd()
+    }
     this.rec = rec
     try {
       rec.start()
@@ -122,6 +137,8 @@ export class BrowserSpeech {
       this.handlers.onError?.('unknown', 'Speech recognition failed to start.')
       return 'unsupported'
     }
+    this.armWatchdog(rec)
+    void this.tuneWatchdogByPermission()
     return 'started'
   }
 
@@ -139,6 +156,7 @@ export class BrowserSpeech {
   cancel(): void {
     this.cancelling = true
     this.activeFlag = false
+    this.clearWatchdog()
     const rec = this.rec
     this.detach()
     if (rec) {
@@ -154,6 +172,62 @@ export class BrowserSpeech {
   dispose(): void {
     this.cancel()
     this.handlers = {}
+  }
+
+  // ------------------------------------------------------------------
+  // Start watchdog: some browser/OS combinations never fire ANY event
+  // for a blocked microphone (observed in production: no onstart, no
+  // onerror, no onend). Without this, the UI would wait forever with no
+  // feedback. The first real event clears the timer; permission state
+  // only tunes how long we wait.
+  // ------------------------------------------------------------------
+  private static readonly WATCHDOG_DEFAULT_MS = 30000 // covers a pending permission prompt
+  private static readonly WATCHDOG_GRANTED_MS = 10000
+  private static readonly WATCHDOG_DENIED_MS = 3000
+
+  private armWatchdog(rec: SpeechRecognitionLike, ms = BrowserSpeech.WATCHDOG_DEFAULT_MS): void {
+    this.clearWatchdog()
+    this.watchdog = setTimeout(() => {
+      this.watchdog = null
+      if (this.rec !== rec || this.sessionLive || this.cancelling) return
+      // service never answered — surface it instead of hanging silently
+      this.sawError = true
+      this.activeFlag = false
+      this.detach()
+      try {
+        rec.abort()
+      } catch {
+        /* ignore */
+      }
+      this.handlers.onError?.(
+        'timeout',
+        'Speech recognition did not respond — the mic may be blocked by the browser or OS.',
+      )
+    }, ms)
+  }
+
+  private clearWatchdog(): void {
+    if (this.watchdog !== null) clearTimeout(this.watchdog)
+    this.watchdog = null
+  }
+
+  private async tuneWatchdogByPermission(): Promise<void> {
+    try {
+      const perms = (globalThis as { navigator?: { permissions?: {
+        query: (d: { name: string }) => Promise<{ state?: string }>
+      } } }).navigator?.permissions
+      if (!perms?.query) return
+      const status = await perms.query({ name: 'microphone' })
+      if (!this.rec || this.sessionLive || this.cancelling) return
+      if (status?.state === 'denied') {
+        this.armWatchdog(this.rec, BrowserSpeech.WATCHDOG_DENIED_MS)
+      } else if (status?.state === 'granted') {
+        this.armWatchdog(this.rec, BrowserSpeech.WATCHDOG_GRANTED_MS)
+      }
+      // 'prompt' / unknown → keep the generous default
+    } catch {
+      /* permissions API unavailable — default watchdog still covers us */
+    }
   }
 
   private detach(): void {
@@ -216,6 +290,7 @@ export class BrowserSpeech {
 
   private handleEnd(): void {
     this.activeFlag = false
+    this.clearWatchdog()
     this.detach()
     // A session that ended without producing anything (silence) is reported
     // honestly instead of silently doing nothing — but never on top of an
