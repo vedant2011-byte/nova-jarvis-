@@ -129,7 +129,8 @@ export function Hud({ intensity }: { intensity: number }) {
             <span className={`chip-dot ${store.settings.wake_word?.enabled ? '' : 'off'}`} /> WAKE WORD
           </span>
           <span className="chip">
-            <span className={`chip-dot ${store.status.llm?.online ? '' : 'off'}`} /> LOCAL AI
+            <span className={`chip-dot ${store.status.llm?.online ? '' : 'off'}`} />
+            {store.status.llm?.provider === 'gemini' ? 'GEMINI AI' : 'LOCAL AI'}
           </span>
           <span className="chip">
             <span className="chip-dot" /> SECURE

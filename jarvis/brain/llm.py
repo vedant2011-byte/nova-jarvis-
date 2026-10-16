@@ -14,6 +14,7 @@ from typing import Any, Dict, Generator, List, Optional
 
 import requests
 
+from jarvis.brain import gemini as gemini_provider
 from jarvis.config.settings import get_settings
 
 log = logging.getLogger("jarvis.brain.llm")
@@ -23,11 +24,64 @@ class LLMOffline(Exception):
     pass
 
 
+# ---------------------------------------------------------------------------
+# Provider selection
+# ---------------------------------------------------------------------------
+def provider() -> str:
+    """Active chat provider: "gemini" | "ollama" | "off".
+
+    `ai.provider` = auto (default) prefers Gemini whenever a GEMINI_API_KEY
+    is configured, otherwise the local Ollama runtime. `ai.runtime == "off"
+    remains the legacy kill-switch and always wins.
+    """
+    settings = get_settings()
+    if settings.get("ai.runtime", "ollama") == "off":
+        return "off"
+    choice = str(settings.get("ai.provider", "auto")).lower().strip()
+    if choice in ("gemini", "ollama", "off"):
+        return choice
+    return "gemini" if gemini_provider.api_key() else "ollama"
+
+
+def provider_name() -> str:
+    return provider()
+
+
+def active_model() -> str:
+    """Model id the current provider will actually use."""
+    if provider() == "gemini":
+        return gemini_provider.model_id()
+    return str(get_settings().get("ai.model", "llama3.2:3b"))
+
+
+def offline_reason() -> str:
+    """Human-readable reason chat is unavailable ('' when healthy)."""
+    p = provider()
+    if p == "off":
+        return "The AI runtime is disabled in settings."
+    if p == "gemini":
+        if not gemini_provider.api_key():
+            return "No GEMINI_API_KEY is configured on the backend."
+        return gemini_provider.last_error() or "The Gemini API is unreachable right now."
+    return f"No local Ollama server detected at {get_settings().get('ai.host')}."
+
+
 def _host() -> str:
     return str(get_settings().get("ai.host", "http://127.0.0.1:11434")).rstrip("/")
 
 
 def is_online(timeout: float = 2.0) -> bool:
+    """True when the active provider is reachable and credentials work."""
+    p = provider()
+    if p == "off":
+        return False
+    if p == "gemini":
+        # Cached credential check against the free GET /models endpoint.
+        return gemini_provider.validate()
+    return _ollama_is_online(timeout)
+
+
+def _ollama_is_online(timeout: float = 2.0) -> bool:
     try:
         r = requests.get(f"{_host()}/api/tags", timeout=timeout)
         return r.status_code == 200
@@ -36,6 +90,16 @@ def is_online(timeout: float = 2.0) -> bool:
 
 
 def list_models() -> List[str]:
+    p = provider()
+    if p == "off":
+        return []
+    if p == "gemini":
+        gemini_provider.validate()
+        return gemini_provider.cached_models() or [gemini_provider.model_id()]
+    return _ollama_list_models()
+
+
+def _ollama_list_models() -> List[str]:
     try:
         r = requests.get(f"{_host()}/api/tags", timeout=3)
         r.raise_for_status()
@@ -59,7 +123,19 @@ def _messages_payload(messages: List[Dict[str, str]], stream: bool) -> Dict[str,
 
 
 def chat(messages: List[Dict[str, str]], timeout: Optional[float] = None) -> str:
-    """Blocking chat completion. Raises LLMOffline when the runtime is down."""
+    """Blocking chat completion through the active provider.
+
+    Raises LLMOffline (Ollama) or GeminiError (Gemini); both carry a
+    user-safe message in str(exc).
+    """
+    if provider() == "gemini":
+        return gemini_provider.chat(messages, timeout=timeout)
+    return _ollama_chat(messages, timeout)
+
+
+def _ollama_chat(messages: List[Dict[str, str]],
+                  timeout: Optional[float] = None) -> str:
+    """Blocking chat completion against local Ollama. Raises LLMOffline."""
     settings = get_settings()
     t = timeout or float(settings.get("ai.request_timeout", 60))
     try:
@@ -78,7 +154,9 @@ def chat(messages: List[Dict[str, str]], timeout: Optional[float] = None) -> str
 
 def chat_stream(messages: List[Dict[str, str]],
                 timeout: Optional[float] = None) -> Generator[str, None, None]:
-    """Streaming chat completion, yielding content chunks."""
+    """Streaming chat completion (Ollama only), yielding content chunks."""
+    if provider() == "gemini":
+        raise LLMOffline("Streaming is not supported by the Gemini provider.")
     settings = get_settings()
     t = timeout or float(settings.get("ai.request_timeout", 60))
     try:

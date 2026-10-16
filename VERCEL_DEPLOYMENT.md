@@ -114,7 +114,7 @@ preserve or configure; the confirmation gate is per-action, not per-user.
 If the deployment will be publicly reachable, consider adding Vercel
 Deployment Protection (dashboard setting, no code change) as a basic guard.
 
-## Environment variables to set in Vercel (no secrets needed)
+## Environment variables to set in Vercel
 
 | Variable | Set on service | Value for deploy | Meaning |
 |---|---|---|---|
@@ -122,17 +122,86 @@ Deployment Protection (dashboard setting, no code change) as a basic guard.
 | `JARVIS_LOG_DIR` | api | `/tmp/jarvis-logs` | log output dir (falls back to stdout-only if unset/blocked) |
 | `JARVIS_DISABLE_DEFAULT_PROTECTED` | api | `1` | the Windows-only protected-path defaults (C:\Windows, AppData...) are meaningless on Linux |
 | `JARVIS_EXTRA_PROTECTED` | api | *(optional)* | semicolon-separated extra paths to always deny |
+| `GEMINI_API_KEY` | api | *(secret)* | Google AI Studio key enabling hosted chat — see "Hosted chat: Google Gemini" below |
+| `GEMINI_MODEL` | api | *(optional)* | overrides the chat model (default `gemini-3.5-flash-lite`) |
 
-Optional, currently **unused by the app** (checked): the frontend has no
-`import.meta.env`/`process.env` usage at all and the backend reads no
-`OLLAMA_HOST`/`JARVIS_MODEL` env vars — those live in `data/settings.json`
-and the README's mention of them in `.env.example` is aspirational. The
-Ollama host can be changed at runtime via Settings → AI; a Vercel deployment
-cannot reach your local Ollama, so LLM will stay offline there (intent
-engine continues to work, honestly labeled).
+The frontend has no `import.meta.env`/`process.env` usage at all — it
+never sees backend variables. The Ollama host and Ollama model live in
+`data/settings.json` and can be changed at runtime via Settings → AI.
 
-There are **no secrets** to configure: no API keys, no DB URLs, no auth.
-Nothing sensitive is written into the repo or this config.
+**Secrets**: the only secret is `GEMINI_API_KEY` (api service only,
+never the `hud` service, never a `VITE_`-prefixed name, never Git). It is
+read server-side from the environment only — never echoed into API
+responses, logs, settings, or the frontend bundle (covered by tests in
+`tests/test_gemini_provider.py`).
+
+## Hosted chat: Google Gemini
+
+The backend provider is selected automatically: with a `GEMINI_API_KEY`
+it uses Google's Gemini API; without one it falls back to local Ollama;
+with `ai.runtime = "off"` chat is disabled entirely. Configuration
+actually used by the code:
+
+| Setting / env var | Default | Meaning |
+|---|---|---|
+| `GEMINI_API_KEY` (env) | — | the only way the key is read; a local `jarvis/.env` (git-ignored) works too |
+| `GEMINI_MODEL` (env) | — | highest-precedence model override |
+| `ai.gemini_model` (Settings → stored JSON) | `gemini-3.5-flash-lite` | stable + free-tier eligible ([models doc](https://ai.google.dev/gemini-api/docs/models)); selected because it verifiably answers for this key (3.8-flash returned 503 UNAVAILABLE, 2.5 models are 404-restricted for new keys) |
+| `ai.provider` | `auto` | `auto` \| `gemini` \| `ollama` \| `off` |
+| `ai.max_output_tokens` | `1024` | per-response output cap |
+| `ai.request_timeout` | `60` | hard request bound (clamped 5–120 s) |
+| `ai.system_instruction` | *(empty)* | optional full override of the Nova identity prompt |
+
+### PowerShell steps (do these once)
+
+1. Create a key (never paste it into Git, chat, or the frontend):
+   open **https://aistudio.google.com/apikey** → create/copy a key.
+2. Add it to the **api** service env (entered at the prompt, never
+   written into the repo):
+   ```powershell
+   cd <repo root>
+   vercel env add GEMINI_API_KEY production
+   # paste the key at the prompt, press Enter
+   ```
+   Or in the dashboard: **Project → Settings → Environment Variables →
+   New → name `GEMINI_API_KEY`, value = the key, scope = the `api`
+   service** (not `hud`, no `VITE_` prefix).
+3. Redeploy so the variable is present at runtime (env changes alone do
+   not redeploy):
+   ```powershell
+   git push origin main        # GitHub integration redeploys both services
+   # or, with the CLI connected:
+   vercel --prod
+   ```
+4. Verify (no secrets printed):
+   ```powershell
+   curl.exe -s https://nova-jarvis-pi.vercel.app/api/status
+   ```
+   Expected JSON now includes `"llm": {"provider": "gemini", "online":
+   true, "model": "gemini-3.5-flash-lite", "error": ""}`. If `online` is
+   `false`, read `error` — it names the exact cause (missing/invalid key,
+   quota, service error) without exposing the key.
+
+### Local development
+
+```powershell
+cd jarvis
+copy .env.example .env        # .env is git-ignored
+notepad .env                  # set GEMINI_API_KEY=<your key>
+```
+
+The stdlib loader in `config/settings.py` reads `jarvis/.env` at startup
+(real environment variables always win; the file is never logged).
+Without a key, local behavior is unchanged: Ollama if present, otherwise
+the honest offline intent engine plus full local computer control.
+
+### Free-tier caveats
+
+The default `gemini-3.5-flash-lite` is free-tier eligible, but the free tier
+has per-minute/per-day token quotas and temporary 429s are expected under
+load; Nova reports them honestly ("rate limit or quota exceeded") and
+never fakes an answer. Models from the 2.5 generation are restricted for
+new keys — stick with the default unless you know your key has access.
 
 ## Manual steps you must perform (in order)
 
@@ -146,8 +215,9 @@ Nothing sensitive is written into the repo or this config.
    the minimal cloud-only dependency set, ~23 MB instead of ~190 MB — and
    runs on Python **3.13** (pinned via `jarvis/.python-version`; Vercel
    supports 3.12/3.13/3.14).
-3. Set the env vars from the table above on the `api` service, then
-   redeploy so they are present at build/runtime.
+3. Set the env vars from the table above on the `api` service (plus
+   `GEMINI_API_KEY` if you want hosted chat — see "Hosted chat: Google
+   Gemini" above), then redeploy so they are present at build/runtime.
 4. Do NOT point a real domain at this expecting full desktop control — see
    the capability table above.
 

@@ -16,6 +16,11 @@ os.environ.setdefault("JARVIS_DATA_DIR", str(ROOT / "data-test"))
 os.environ.setdefault("JARVIS_LOG_DIR", str(ROOT / "logs-test"))
 # pytest temp dirs live under AppData; relax default protected list for tests
 os.environ.setdefault("JARVIS_DISABLE_DEFAULT_PROTECTED", "1")
+# Never load a developer's real jarvis/.env (a real GEMINI_API_KEY would make
+# tests hit the live API); tests inject their own fake key via monkeypatch.
+os.environ.setdefault("JARVIS_DISABLE_DOTENV", "1")
+for _secret_key in ("GEMINI_API_KEY", "GEMINI_MODEL"):
+    os.environ.pop(_secret_key, None)
 
 
 @pytest.fixture()

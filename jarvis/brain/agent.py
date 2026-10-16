@@ -18,6 +18,7 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional
 
 from jarvis.brain import intent_engine, llm
+from jarvis.brain.gemini import GeminiError
 from jarvis.brain.context import build_messages, dynamic_context
 from jarvis.brain.prompts import build_system_prompt
 from jarvis.config.settings import get_settings
@@ -143,8 +144,7 @@ class JarvisAgent:
         self.emit("conversation", {"role": "user", "content": text, "source": source})
         self.emit("state", {"state": "thinking"})
 
-        settings = get_settings()
-        llm_online = settings.get("ai.runtime", "ollama") != "off" and llm.is_online()
+        llm_online = llm.is_online()          # provider-aware (Gemini or Ollama)
         tool_calls: List[Dict[str, Any]] = []
         reply = ""
 
@@ -156,6 +156,12 @@ class JarvisAgent:
         except TaskCancelledByUser:
             reply = "Task stopped."
             self.emit("task_stopped", {"reason": "cancelled"})
+        except (GeminiError, llm.LLMOffline) as exc:
+            # Provider failure with a safe, user-facing message — never a
+            # fabricated answer and never a raw exception dump.
+            log.warning("provider unavailable: %s", exc)
+            reply = str(exc)
+            self.emit("error", {"message": str(exc)})
         except Exception as exc:  # noqa: BLE001
             log.exception("agent failure")
             reply = f"Something went wrong: {exc}"
@@ -252,7 +258,7 @@ class JarvisAgent:
 
         intent = intent_engine.match_intent(text)
         if intent is None:
-            return intent_engine.respond_offline(text), []
+            return self._chat_unavailable_reply(text), []
 
         tool_name = intent["tool"]
         args = intent["arguments"]
@@ -268,10 +274,26 @@ class JarvisAgent:
         return reply, [{"tool": tool_name, "arguments": args, "result": result}]
 
     # ------------------------------------------------------------------
+    def _chat_unavailable_reply(self, text: str) -> str:
+        """Honest fallback when no model can answer, provider-aware.
+
+        Direct-computer-command intents are handled before this point, so
+        local control keeps working even with no model at all.
+        """
+        if llm.provider() == "gemini":
+            reason = llm.offline_reason() or "the model is unavailable"
+            return (f"My AI provider is unreachable right now ({reason}), so I "
+                    "can't answer conversational questions at the moment. "
+                    "Direct computer commands still work.")
+        return intent_engine.respond_offline(text)
+
+    # ------------------------------------------------------------------
     def status_snapshot(self) -> Dict[str, Any]:
         from jarvis.brain import llm as llm_mod
         return {
             "llm_online": llm_mod.is_online(),
+            "provider": llm_mod.provider_name(),
+            "model": llm_mod.active_model(),
             "models": llm_mod.list_models()[:20],
             "tools": self.registry.names(),
             "pending_confirmations": self.confirmations.pending(),

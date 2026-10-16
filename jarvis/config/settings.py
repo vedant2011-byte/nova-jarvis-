@@ -24,6 +24,37 @@ from typing import Any, Dict, List, Optional
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+# ---------------------------------------------------------------------------
+# Local .env loading (stdlib only — no python-dotenv dependency)
+# ---------------------------------------------------------------------------
+def _load_dotenv(path: Path) -> None:
+    """Load KEY=VALUE lines from a git-ignored .env file into os.environ.
+
+    Real environment variables always win (we never overwrite them), values
+    are never logged, and a missing file is a silent no-op (serverless
+    platforms inject env vars directly). Also runs on Vercel safely.
+    """
+    if os.getenv("JARVIS_DISABLE_DOTENV") == "1":
+        return
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if not key or not value:
+            continue
+        os.environ.setdefault(key, value)  # never clobber a real env var
+
+
+_load_dotenv(PROJECT_ROOT / ".env")
+
+
 class _GUID(ctypes.Structure):
     _fields_ = [
         ("Data1", ctypes.c_ulong),
@@ -123,6 +154,9 @@ DEFAULTS: Dict[str, Any] = {
     },
     "ai": {
         "runtime": "ollama",              # ollama | off (intent engine only)
+        "provider": "auto",               # auto | gemini | ollama | off
+        "gemini_model": "gemini-3.5-flash-lite",  # stable + free-tier + verified for this key
+        "max_output_tokens": 1024,        # per-response token cap (Gemini)
         "host": "http://127.0.0.1:11434",
         "model": "llama3.2:3b",
         "temperature": 0.2,
@@ -131,6 +165,7 @@ DEFAULTS: Dict[str, Any] = {
         "response_length": "concise",     # concise | normal | detailed
         "max_tool_iterations": 6,
         "fallback_to_intent_engine": True,
+        "system_instruction": "",         # optional full override of the Nova identity
     },
     "voice": {
         "input_device": None,             # None = system default

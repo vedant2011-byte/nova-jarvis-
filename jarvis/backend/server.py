@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # Logging setup (before other jarvis imports)
@@ -124,7 +124,9 @@ def _start_voice_safely() -> None:
 async def _boot_sequence() -> None:
     steps = [
         ("VOICE ENGINE", listener.running if listener else False),
-        ("AI ENGINE", llm_mod.is_online()),
+        # AI health may hit the network (Gemini credential check) — keep it
+        # off the event loop.
+        ("AI ENGINE", await asyncio.to_thread(llm_mod.is_online)),
         ("MEMORY", True),
         ("TOOL SYSTEM", True),
         ("SECURITY", True),
@@ -189,6 +191,10 @@ def _submit_user_command(text: str, source: str = "text") -> None:
     """Run a user command through planner/agent on a worker thread."""
     if not text.strip():
         return
+    if len(text) > 4000:
+        # WS / voice paths skip pydantic — bound them here too.
+        bus.emit_threadsafe("error", {"message": "Message too long — maximum 4000 characters."})
+        return
 
     # Voice/UI answers to a pending confirmation bypass the agent's busy lock.
     # Only EXPLICIT approve/deny words resolve a confirmation — never silence
@@ -251,7 +257,7 @@ def speak_text(text: str) -> None:
 # Schemas
 # ---------------------------------------------------------------------------
 class CommandIn(BaseModel):
-    text: str
+    text: str = Field(..., min_length=1, max_length=4000)
     source: str = "text"
 
 
@@ -281,13 +287,19 @@ async def health() -> JSONResponse:
 @app.get("/api/status")
 async def status() -> JSONResponse:
     assert agent is not None
+    # Provider checks hit the network on a cold cache — run them off the
+    # event loop so a slow provider can't stall other requests.
+    online, models = await asyncio.to_thread(_llm_probe)
     return JSONResponse({
         "state": state_snapshot(),
         "llm": {
-            "online": llm_mod.is_online(),
-            "models": llm_mod.list_models()[:30],
+            "online": online,
+            "models": models[:30],
             "configured": settings.get("ai.model"),
             "runtime": settings.get("ai.runtime"),
+            "provider": llm_mod.provider_name(),
+            "model": llm_mod.active_model(),
+            "error": "" if online else llm_mod.offline_reason(),
         },
         "voice": {
             "listening": bool(listener and listener.running),
@@ -301,6 +313,11 @@ async def status() -> JSONResponse:
         "browser": {"playwright": _browser_available()},
         "pending_confirmations": confirmations.pending(),
     })
+
+
+def _llm_probe() -> tuple:
+    """Blocking provider health + model list, safe to run in a worker thread."""
+    return llm_mod.is_online(), llm_mod.list_models()
 
 
 def _voice_devices() -> List[Dict[str, Any]]:

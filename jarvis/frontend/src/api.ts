@@ -11,7 +11,15 @@ export type SystemStats = {
 
 export type StatusInfo = {
   state: { app_state: string; last_action?: string }
-  llm: { online: boolean; models: string[]; configured: string; runtime: string }
+  llm: {
+    online: boolean
+    models: string[]
+    configured: string
+    runtime: string
+    provider?: 'gemini' | 'ollama' | 'off' | string
+    model?: string
+    error?: string
+  }
   voice: { listening: boolean; devices: { index: number; name: string; default: boolean }[]; mode: string }
   tts: { sapi: boolean; piper: boolean }
   browser: { playwright: boolean }

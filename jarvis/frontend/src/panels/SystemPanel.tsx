@@ -33,7 +33,11 @@ export function SystemPanel({ store }: { store: JarvisStore }) {
     <aside className="panel" aria-label="System status">
       <div className="panel-title"><span>SYSTEM STATUS</span></div>
       <div className="status-list">
-        <Row k="AI ENGINE" v={st.llm?.online ? 'ONLINE' : 'OFFLINE'} ok={st.llm?.online} />
+        <Row
+          k="AI ENGINE"
+          v={`${st.llm?.online ? 'ONLINE' : 'OFFLINE'}${st.llm?.provider === 'gemini' ? ' · GEMINI' : ''}`}
+          ok={st.llm?.online}
+        />
         <Row k="VOICE ENGINE" v={st.voice?.listening ? 'ONLINE' : 'OFFLINE'} ok={st.voice?.listening} />
         <Row k="TTS" v={st.tts?.sapi || st.tts?.piper ? 'ONLINE' : 'OFFLINE'} ok={!!(st.tts?.sapi || st.tts?.piper)} />
         <Row k="MEMORY" v="ONLINE" ok />

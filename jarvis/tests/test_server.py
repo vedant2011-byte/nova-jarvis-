@@ -84,3 +84,48 @@ def test_stop(client):
     r = client.post("/api/stop")
     assert r.status_code == 200
     assert r.json()["stopped"] is True
+
+
+# ---------------------------------------------------------------------------
+# Provider reporting + request validation (Gemini integration)
+# ---------------------------------------------------------------------------
+def test_status_reports_provider_fields(client, monkeypatch):
+    """Status distinguishes provider health from generic availability."""
+    import jarvis.backend.server as server_mod
+    monkeypatch.setattr(server_mod, "_llm_probe",
+                        lambda: (True, ["gemini-3.5-flash-lite"]))
+    monkeypatch.setenv("GEMINI_API_KEY", "shape-only-key-for-this-test")
+    r = client.get("/api/status")
+    assert r.status_code == 200
+    block = r.json()["llm"]
+    assert block["online"] is True
+    assert block["provider"] == "gemini"
+    assert block["model"] == "gemini-3.5-flash-lite"
+    assert block["error"] == ""
+    # key must never appear in any API response
+    assert "shape-only-key-for-this-test" not in r.text
+
+
+def test_status_offline_reports_reason(client, monkeypatch):
+    import jarvis.backend.server as server_mod
+    monkeypatch.setattr(server_mod, "_llm_probe", lambda: (False, []))
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    r = client.get("/api/status")
+    assert r.status_code == 200
+    block = r.json()["llm"]
+    assert block["online"] is False
+    assert isinstance(block["error"], str) and block["error"]
+
+
+def test_command_rejects_oversized_and_malformed(client):
+    assert client.post("/api/command", json={"text": "x" * 4001}).status_code == 422
+    assert client.post("/api/command", json={"text": ""}).status_code == 422
+    assert client.post("/api/command", json={}).status_code == 422
+    assert client.post("/api/command", content=b"not json",
+                       headers={"Content-Type": "application/json"}).status_code == 422
+
+
+def test_command_accepts_normal_message(client):
+    r = client.post("/api/command", json={"text": "hello", "source": "text"})
+    assert r.status_code == 200
+    assert r.json()["accepted"] is True

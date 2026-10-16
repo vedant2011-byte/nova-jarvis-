@@ -109,28 +109,45 @@ function AITab({ store }: { store: JarvisStore }) {
   const ai = (store.settings.ai ?? {}) as Record<string, any>
   const [models, setModels] = useState<string[]>([])
   const [online, setOnline] = useState<boolean | null>(null)
+  const [provider, setProvider] = useState<string>('')
+  const [llmError, setLlmError] = useState<string>('')
 
   useEffect(() => {
     api<StatusInfo>('/api/status').then(st => {
       setModels(st.llm?.models ?? [])
       setOnline(st.llm?.online ?? false)
+      setProvider(st.llm?.provider ?? '')
+      setLlmError(st.llm?.error ?? '')
     }).catch(() => setOnline(false))
   }, [])
+
+  const isGemini = provider === 'gemini'
+  const modelKey = isGemini ? 'gemini_model' : 'model'
+  const currentModel = String(ai[modelKey] ?? ai.model ?? '')
+
+  const statusLine = online
+    ? (isGemini ? 'Gemini API authenticated' : 'Ollama detected')
+    : (llmError || (isGemini
+        ? 'Gemini unreachable — the backend API key may be missing or invalid'
+        : 'Ollama not reachable — JARVIS still controls the PC offline'))
 
   return (
     <div>
       <Field label={`RUNTIME STATUS — ${online ? 'ONLINE' : 'OFFLINE (offline intent mode active)'}`}>
         <div style={{ fontSize: 13, color: online ? 'var(--ok)' : 'var(--warn)' }}>
-          {online ? 'Ollama detected' : 'Ollama not reachable — JARVIS still controls the PC offline'}
+          {statusLine}
         </div>
       </Field>
-      <Field label="MODEL" hint={models.length ? '' : 'Install models with: ollama pull llama3.2:3b'}>
+      <Field
+        label={`MODEL${isGemini ? ' (GEMINI_MODEL)' : ''}`}
+        hint={models.length ? '' : 'Install models with: ollama pull llama3.2:3b'}
+      >
         <select
-          value={String(ai.model ?? '')}
-          onChange={e => store.updateSettings({ ai: { model: e.target.value } })}
+          value={currentModel}
+          onChange={e => store.updateSettings({ ai: { [modelKey]: e.target.value } })}
           style={{ width: '100%' }}
         >
-          {(models.length ? models : [String(ai.model ?? 'llama3.2:3b')]).map(m => (
+          {(models.length ? models : [currentModel || 'llama3.2:3b']).map(m => (
             <option key={m} value={m}>{m}</option>
           ))}
         </select>
